@@ -1,0 +1,27 @@
+# Core
+fastapi
+uvicorn[standard]
+python-dotenv
+
+# Database
+motor
+pymongo
+
+# Auth
+python-jose[cryptography]
+passlib[bcrypt]
+bcrypt==4.0.1
+python-multipart
+email-validator
+
+# Email
+aiosmtplib
+
+# HTTP clients
+httpx
+aiohttp
+
+# Pipecat + WebRTC (for post-call STT + AI summary)
+pipecat-ai[webrtc]
+pipecat-ai[deepgram]
+pipecat-ai[groq]
