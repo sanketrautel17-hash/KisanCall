@@ -399,7 +399,3 @@ The CI pipeline will automatically run linting and build checks on your PR.
 
 ---
 
-## 📄 License
-
-MIT License © 2025 KisanCall  
-Made with ❤️ in India 🇮🇳
