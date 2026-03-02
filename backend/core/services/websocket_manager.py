@@ -11,7 +11,9 @@ from typing import Dict, Optional
 
 from fastapi import WebSocket
 
-logger = logging.getLogger(__name__)
+from commons.logger import logger as get_logger
+
+logger = get_logger(__name__)
 
 
 class ConnectionManager:

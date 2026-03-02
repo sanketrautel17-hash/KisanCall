@@ -7,7 +7,7 @@
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import api from '../api';
+import api, { WS_BASE_URL } from '../api';
 import { useAuth } from '../AuthContext';
 import { useToast } from '../components/ToastProvider';
 import { LanguageToggle } from '../components/LanguageContext';
@@ -49,39 +49,80 @@ export default function ExpertDashboard() {
 
     useEffect(() => { loadData(); }, [loadData]);
 
-    // ── WebSocket ──────────────────────────────────────────────────────────
+    // ── WebSocket with auto-reconnect ──────────────────────────────────────
     useEffect(() => {
         if (!token) return;
-        const ws = new WebSocket('ws://localhost:8000/ws/expert');
-        wsRef.current = ws;
 
-        ws.onopen = () => {
-            ws.send(JSON.stringify({ type: 'auth', token }));
-            setWsStatus('connected');
+        // `active` prevents StrictMode's double-invoke from leaving a zombie WS.
+        // When cleanup runs before onopen fires, we close immediately in onopen.
+        let active = true;
+        let ws = null;
+        let hb = null;
+        let retryTimeout = null;
+        let retryDelay = 1500; // start at 1.5s, back off up to 30s
+
+        const connect = () => {
+            if (!active) return;
+
+            ws = new WebSocket(`${WS_BASE_URL}/ws/expert`);
+            wsRef.current = ws;
+
+            ws.onopen = () => {
+                if (!active) { ws.close(); return; }   // StrictMode cleanup fired
+                retryDelay = 1500;                      // reset backoff on success
+                ws.send(JSON.stringify({ type: 'auth', token }));
+                setWsStatus('connected');
+
+                // Start heartbeat
+                hb = setInterval(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'ping' }));
+                    }
+                }, 25000);
+            };
+
+            ws.onmessage = (e) => {
+                if (!active) return;
+                let msg;
+                try { msg = JSON.parse(e.data); } catch { return; }
+
+                if (msg.type === 'incoming_call') {
+                    setIncomingCall({ call_id: msg.call_id, farmer_name: msg.farmer_name, topic: msg.topic });
+                    toast.info(`📞 Incoming call from ${msg.farmer_name} about "${msg.topic}"`, 0);
+                } else if (msg.type === 'call_ended') {
+                    setIncomingCall(null);
+                    toast.info('Call ended by farmer.');
+                    loadData();
+                }
+            };
+
+            ws.onerror = () => {
+                // Let onclose handle reconnect
+            };
+
+            ws.onclose = () => {
+                clearInterval(hb);
+                hb = null;
+                setWsStatus('disconnected');
+                if (!active) return;   // intentional unmount — don't reconnect
+                // Auto-reconnect with exponential backoff (max 30s)
+                retryTimeout = setTimeout(() => {
+                    retryDelay = Math.min(retryDelay * 1.5, 30000);
+                    connect();
+                }, retryDelay);
+            };
         };
 
-        ws.onmessage = (e) => {
-            let msg;
-            try { msg = JSON.parse(e.data); } catch { return; }
+        connect();
 
-            if (msg.type === 'incoming_call') {
-                setIncomingCall({ call_id: msg.call_id, farmer_name: msg.farmer_name, topic: msg.topic });
-                toast.info(`📞 Incoming call from ${msg.farmer_name} about "${msg.topic}"`, 0);
-            } else if (msg.type === 'call_ended') {
-                setIncomingCall(null);
-                toast.info('Call ended by farmer.');
-                loadData();
+        return () => {
+            active = false;
+            clearInterval(hb);
+            clearTimeout(retryTimeout);
+            if (ws && ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+                ws.close();
             }
         };
-
-        ws.onclose = () => setWsStatus('disconnected');
-        ws.onerror = () => setWsStatus('disconnected');
-
-        const hb = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
-        }, 25000);
-
-        return () => { clearInterval(hb); ws.close(); };
     }, [token, loadData, toast]);
 
     // ── Toggle online ──────────────────────────────────────────────────────

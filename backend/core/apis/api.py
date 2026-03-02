@@ -10,8 +10,11 @@ import os
 from dotenv import load_dotenv
 
 from core.database import connect_db, close_db
+from commons.logger import logger as get_logger
 
 load_dotenv()
+
+log = get_logger(__name__)
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
@@ -21,9 +24,13 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage startup and shutdown events."""
+    log.info("[App] KisanCall API starting up...")
     await connect_db()
+    log.info("[App] Startup complete. Routers registered.")
     yield
+    log.info("[App] KisanCall API shutting down...")
     await close_db()
+    log.info("[App] Shutdown complete.")
 
 
 # ─── FastAPI App ───────────────────────────────────────────────────────────────

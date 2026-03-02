@@ -7,7 +7,7 @@
  */
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import api from '../api';
+import api, { WS_BASE_URL } from '../api';
 import { useAuth } from '../AuthContext';
 import { useToast } from '../components/ToastProvider';
 import { useLanguage, LanguageToggle } from '../components/LanguageContext';
@@ -55,57 +55,94 @@ export default function FarmerDashboard() {
 
     useEffect(() => { loadHistory(); }, [loadHistory]);
 
-    // ── WebSocket ──────────────────────────────────────────────────────────
+    // ── WebSocket with auto-reconnect ──────────────────────────────────────
     useEffect(() => {
         if (!token) return;
-        const ws = new WebSocket('ws://localhost:8000/ws/farmer');
-        wsRef.current = ws;
 
-        ws.onopen = () => {
-            ws.send(JSON.stringify({ type: 'auth', token }));
-            setWsStatus('connected');
+        let active = true;
+        let ws = null;
+        let hb = null;
+        let retryTimeout = null;
+        let retryDelay = 1500;
+
+        const connect = () => {
+            if (!active) return;
+
+            ws = new WebSocket(`${WS_BASE_URL}/ws/farmer`);
+            wsRef.current = ws;
+
+            ws.onopen = () => {
+                if (!active) { ws.close(); return; }
+                retryDelay = 1500;
+                ws.send(JSON.stringify({ type: 'auth', token }));
+                setWsStatus('connected');
+
+                hb = setInterval(() => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: 'ping' }));
+                    }
+                }, 25000);
+            };
+
+            ws.onmessage = (e) => {
+                if (!active) return;
+                let msg;
+                try { msg = JSON.parse(e.data); } catch { return; }
+
+                switch (msg.type) {
+                    case 'call_accepted':
+                        toast.success(`✅ ${msg.expert_name} accepted your call! Connecting...`);
+                        setCallData((prev) => prev ? { ...prev, status: 'active', expert_name: msg.expert_name } : prev);
+                        setTimeout(() => navigate(`/call/${msg.call_id}`), 1200);
+                        break;
+                    case 'call_rejected':
+                        toast.error(msg.message || 'Your call was rejected. Trying to find another expert...');
+                        setCalling(false);
+                        setCallData(null);
+                        loadHistory();
+                        break;
+                    case 'call_reassigned':
+                        toast.info(msg.message || 'Reassigning to another expert...');
+                        break;
+                    case 'summary_ready':
+                        toast.success('🤖 Your AI consultation summary is ready!', 6000);
+                        loadHistory();
+                        break;
+                    case 'pending_call':
+                        toast.info('You have a pending call waiting for an expert.');
+                        setCallData({ call_id: msg.call_id });
+                        break;
+                    default:
+                        break;
+                }
+            };
+
+            ws.onerror = () => {
+                // Let onclose handle reconnect
+            };
+
+            ws.onclose = () => {
+                clearInterval(hb);
+                hb = null;
+                setWsStatus('disconnected');
+                if (!active) return;
+                retryTimeout = setTimeout(() => {
+                    retryDelay = Math.min(retryDelay * 1.5, 30000);
+                    connect();
+                }, retryDelay);
+            };
         };
 
-        ws.onmessage = (e) => {
-            let msg;
-            try { msg = JSON.parse(e.data); } catch { return; }
+        connect();
 
-            switch (msg.type) {
-                case 'call_accepted':
-                    toast.success(`✅ ${msg.expert_name} accepted your call! Connecting...`);
-                    setCallData((prev) => prev ? { ...prev, status: 'active', expert_name: msg.expert_name } : prev);
-                    setTimeout(() => navigate(`/call/${msg.call_id}`), 1200);
-                    break;
-                case 'call_rejected':
-                    toast.error(msg.message || 'Your call was rejected. Trying to find another expert...');
-                    setCalling(false);
-                    setCallData(null);
-                    loadHistory();
-                    break;
-                case 'call_reassigned':
-                    toast.info(msg.message || 'Reassigning to another expert...');
-                    break;
-                case 'summary_ready':
-                    toast.success('🤖 Your AI consultation summary is ready!', 6000);
-                    loadHistory();
-                    break;
-                case 'pending_call':
-                    toast.info('You have a pending call waiting for an expert.');
-                    setCallData({ call_id: msg.call_id });
-                    break;
-                default:
-                    break;
+        return () => {
+            active = false;
+            clearInterval(hb);
+            clearTimeout(retryTimeout);
+            if (ws && ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
+                ws.close();
             }
         };
-
-        ws.onclose = () => setWsStatus('disconnected');
-        ws.onerror = () => setWsStatus('disconnected');
-
-        const hb = setInterval(() => {
-            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
-        }, 25000);
-
-        return () => { clearInterval(hb); ws.close(); };
     }, [token, navigate, toast, loadHistory]);
 
     // ── Request call ───────────────────────────────────────────────────────

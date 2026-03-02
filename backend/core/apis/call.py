@@ -54,8 +54,9 @@ from core.services.websocket_manager import manager
 from core.services.recording import save_recording, recording_exists, delete_recording
 from core.services.transcription import transcribe_audio
 from core.services.ai_summary import generate_summary
+from commons.logger import logger as get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 router = APIRouter()
 
 
@@ -72,6 +73,7 @@ def _serialize_call(doc: dict) -> CallPublic:
         topic=doc["topic"],
         status=doc["status"],
         offer_sdp=doc.get("offer_sdp"),        # ← needed by ExpertCallScreen fallback
+        answer_sdp=doc.get("answer_sdp"),      # ← needed by CallScreen fallback
         transcript=doc.get("transcript"),
         summary=doc.get("summary"),
         language_detected=doc.get("language_detected"),

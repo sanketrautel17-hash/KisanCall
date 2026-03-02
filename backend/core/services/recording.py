@@ -17,8 +17,9 @@ Directory: backend/recordings/<call_id>.webm   (or .wav)
 import logging
 import os
 from pathlib import Path
+from commons.logger import logger as get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 

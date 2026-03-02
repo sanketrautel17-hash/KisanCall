@@ -18,10 +18,11 @@ from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
+from commons.logger import logger as get_logger
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 DEEPGRAM_URL = "https://api.deepgram.com/v1/listen"

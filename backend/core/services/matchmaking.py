@@ -10,8 +10,9 @@ from bson import ObjectId
 
 from core.database import get_collection
 from core.services.websocket_manager import manager
+from commons.logger import logger as get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 async def find_available_expert(exclude_ids: list[str] | None = None) -> Optional[dict]:

@@ -6,7 +6,11 @@ import os
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 
+from commons.logger import logger as get_logger
+
 load_dotenv()
+
+log = get_logger(__name__)
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/kisancall")
 
@@ -16,8 +20,12 @@ client: AsyncIOMotorClient = None
 async def connect_db():
     """Create the MongoDB connection on app startup."""
     global client
-    client = AsyncIOMotorClient(MONGO_URI)
-    print(f"[DB] MongoDB connected: {MONGO_URI}")
+    try:
+        client = AsyncIOMotorClient(MONGO_URI)
+        log.info(f"[DB] MongoDB connected: {MONGO_URI}")
+    except Exception as e:
+        log.error(f"[DB] Failed to connect to MongoDB: {e}")
+        raise
 
 
 async def close_db():
@@ -25,7 +33,7 @@ async def close_db():
     global client
     if client:
         client.close()
-        print("[DB] MongoDB connection closed.")
+        log.info("[DB] MongoDB connection closed.")
 
 
 def get_db():

@@ -67,6 +67,7 @@ class CallPublic(BaseModel):
     topic: str
     status: str
     offer_sdp: Optional[str] = None    # Exposed so ExpertCallScreen can use it as fallback
+    answer_sdp: Optional[str] = None   # Exposed so CallScreen can use it as fallback
     transcript: Optional[str]
     summary: Optional[str]
     language_detected: Optional[str]

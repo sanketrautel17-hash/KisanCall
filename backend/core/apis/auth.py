@@ -28,8 +28,11 @@ from core.services.auth_service import (
     get_current_user,
 )
 from core.services.email_service import send_verification_email
+from commons.logger import logger as get_logger
 
 load_dotenv()
+
+log = get_logger(__name__)
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 GOOGLE_CLIENT_ID = os.getenv("CLIENT_ID", "").strip()
@@ -60,11 +63,13 @@ async def signup(body: SignupRequest):
     Register a new farmer or expert.
     Sends a verification email with a unique link.
     """
+    log.info(f"[Auth:signup] Attempt — email={body.email}, role={body.role}")
     users = get_collection("users")
 
     # Check if email already exists
     existing = await users.find_one({"email": body.email})
     if existing:
+        log.warning(f"[Auth:signup] Duplicate email: {body.email}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="An account with this email already exists",
@@ -84,6 +89,7 @@ async def signup(body: SignupRequest):
     }
 
     result = await users.insert_one(user_doc)
+    log.info(f"[Auth:signup] New user created: id={result.inserted_id}, email={body.email}")
 
     # Send verification email (non-blocking — don't fail signup if email fails)
     email_sent = await send_verification_email(
@@ -91,6 +97,9 @@ async def signup(body: SignupRequest):
         name=body.name,
         token=verification_token,
     )
+
+    if not email_sent:
+        log.warning(f"[Auth:signup] Verification email failed for {body.email}")
 
     return {
         "status": "success",
@@ -114,10 +123,12 @@ async def verify_email(token: str):
     Clicked from the email link.
     Marks user as verified and redirects to login page.
     """
+    log.info(f"[Auth:verify-email] Token received: {token[:8]}...")
     users = get_collection("users")
 
     user = await users.find_one({"verification_token": token})
     if not user:
+        log.warning(f"[Auth:verify-email] Invalid or expired token: {token[:8]}...")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Invalid or expired verification link",
@@ -125,6 +136,7 @@ async def verify_email(token: str):
 
     if user.get("is_verified"):
         # Already verified — redirect straight to login
+        log.info(f"[Auth:verify-email] Already verified: {user['email']}")
         return RedirectResponse(url=f"{FRONTEND_URL}/login?already_verified=true")
 
     # Mark verified, clear token
@@ -133,6 +145,7 @@ async def verify_email(token: str):
         {"$set": {"is_verified": True, "verification_token": None}},
     )
 
+    log.info(f"[Auth:verify-email] Success: {user['email']}")
     # Redirect to frontend login with success message
     return RedirectResponse(url=f"{FRONTEND_URL}/login?verified=true")
 
@@ -144,6 +157,7 @@ async def login(body: LoginRequest):
     """
     Authenticate user → return JWT access token + user profile.
     """
+    log.info(f"[Auth:login] Attempt — email={body.email}")
     users = get_collection("users")
 
     user = await users.find_one({"email": body.email})
@@ -155,12 +169,15 @@ async def login(body: LoginRequest):
     )
 
     if not user:
+        log.warning(f"[Auth:login] No account found: {body.email}")
         raise invalid_exc
 
     if not verify_password(body.password, user["hashed_password"]):
+        log.warning(f"[Auth:login] Wrong password for: {body.email}")
         raise invalid_exc
 
     if not user.get("is_verified"):
+        log.warning(f"[Auth:login] Unverified account login attempt: {body.email}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Please verify your email address before logging in",
@@ -168,6 +185,7 @@ async def login(body: LoginRequest):
 
     # Create JWT
     token = create_access_token(data={"sub": str(user["_id"]), "role": user["role"]})
+    log.info(f"[Auth:login] Success — user={user['_id']}, role={user['role']}")
 
     return TokenResponse(
         access_token=token,
@@ -199,6 +217,7 @@ async def google_auth(body: GoogleAuthRequest):
     - If user is new: creates account with Google info, auto-verified
     - Returns the same KisanCall JWT token as /auth/login
     """
+    log.info("[Auth:google] Google OAuth attempt")
     # ── 1. Verify Google ID token with Google ─────────────────────────────────
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.get(
@@ -207,6 +226,7 @@ async def google_auth(body: GoogleAuthRequest):
         )
 
     if response.status_code != 200:
+        log.warning(f"[Auth:google] Token verification failed: HTTP {response.status_code}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid Google token. Please try signing in again.",
@@ -217,6 +237,7 @@ async def google_auth(body: GoogleAuthRequest):
     # ── 2. Validate audience (must match our CLIENT_ID) ───────────────────────
     token_aud = token_info.get("aud", "")
     if GOOGLE_CLIENT_ID and token_aud != GOOGLE_CLIENT_ID:
+        log.warning(f"[Auth:google] Audience mismatch: got={token_aud}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token audience mismatch.",
@@ -244,6 +265,7 @@ async def google_auth(body: GoogleAuthRequest):
     user = await users.find_one({"email": google_email})
 
     if user:
+        log.info(f"[Auth:google] Existing user login via Google: {google_email}")
         # Existing user — log them in (update name from Google if blank)
         if not user.get("name"):
             await users.update_one(
@@ -260,6 +282,7 @@ async def google_auth(body: GoogleAuthRequest):
             user["is_verified"] = True
 
     else:
+        log.info(f"[Auth:google] New user signup via Google: {google_email}, role={body.role}")
         # New user — create account (auto-verified via Google)
         user_doc = {
             "name": google_name,
@@ -278,6 +301,7 @@ async def google_auth(body: GoogleAuthRequest):
 
     # ── 5. Issue KisanCall JWT ────────────────────────────────────────────────
     token = create_access_token(data={"sub": str(user["_id"]), "role": user["role"]})
+    log.info(f"[Auth:google] JWT issued for {google_email}")
 
     return TokenResponse(
         access_token=token,

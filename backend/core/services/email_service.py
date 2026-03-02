@@ -10,10 +10,11 @@ from email.mime.text import MIMEText
 
 import aiosmtplib
 from dotenv import load_dotenv
+from commons.logger import logger as get_logger
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 EMAIL_FROM = os.getenv("EMAIL_FROM", "")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")

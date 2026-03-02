@@ -14,7 +14,9 @@ from core.database import get_collection
 from core.models.call import CallPublic
 from core.models.user import UserPublic
 from core.services.auth_service import require_farmer
+from commons.logger import logger as get_logger
 
+log = get_logger(__name__)
 router = APIRouter()
 
 
@@ -49,8 +51,9 @@ async def farmer_dashboard(
     Return the farmer's profile and any active/pending calls.
     Used as the initial data load for the farmer dashboard page.
     """
-    calls = get_collection("calls")
     farmer_id = str(farmer["_id"])
+    log.info(f"[Farmer:dashboard] Request — farmer_id={farmer_id}")
+    calls = get_collection("calls")
 
     # Active or pending call
     active_call = await calls.find_one(
@@ -62,6 +65,7 @@ async def farmer_dashboard(
     total = await calls.count_documents({"farmer_id": farmer_id})
     ended = await calls.count_documents({"farmer_id": farmer_id, "status": "ended"})
 
+    log.debug(f"[Farmer:dashboard] farmer_id={farmer_id} — total={total}, ended={ended}, active={bool(active_call)}")
     return {
         "status": "success",
         "data": {
@@ -97,6 +101,7 @@ async def farmer_call_history(
     """
     calls = get_collection("calls")
     farmer_id = str(farmer["_id"])
+    log.info(f"[Farmer:calls] History — farmer_id={farmer_id}, page={page}, limit={limit}")
 
     skip = (page - 1) * limit
 

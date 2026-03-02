@@ -17,7 +17,9 @@ from core.database import get_collection
 from core.models.call import CallPublic, FollowupNotePayload
 from core.models.user import UserPublic
 from core.services.auth_service import require_expert
+from commons.logger import logger as get_logger
 
+log = get_logger(__name__)
 router = APIRouter()
 
 
@@ -51,8 +53,9 @@ async def expert_dashboard(
     """
     Expert's profile, online status, and any active call.
     """
-    calls = get_collection("calls")
     expert_id = str(expert["_id"])
+    log.info(f"[Expert:dashboard] Request — expert_id={expert_id}")
+    calls = get_collection("calls")
 
     active_call = await calls.find_one(
         {"expert_id": expert_id, "status": {"$in": ["pending", "active"]}},
@@ -62,6 +65,7 @@ async def expert_dashboard(
     total = await calls.count_documents({"expert_id": expert_id})
     ended = await calls.count_documents({"expert_id": expert_id, "status": "ended"})
 
+    log.debug(f"[Expert:dashboard] expert_id={expert_id} — total={total}, ended={ended}, is_online={expert.get('is_online')}")
     return {
         "status": "success",
         "data": {
@@ -102,6 +106,7 @@ async def toggle_online(
         {"_id": expert_id},
         {"$set": {"is_online": new_status}},
     )
+    log.info(f"[Expert:toggle-online] expert_id={expert_id} — is_online set to {new_status}")
 
     # If expert just came online, check for unassigned pending calls
     if new_status:
@@ -109,6 +114,7 @@ async def toggle_online(
         calls = get_collection("calls")
         unassigned = await calls.find_one({"status": "pending", "expert_id": None})
         if unassigned:
+            log.info(f"[Expert:toggle-online] Found unassigned pending call {unassigned['_id']} — assigning to expert {expert_id}")
             await assign_expert_to_call(str(unassigned["_id"]), expert)
             unassigned["expert_id"] = str(expert["_id"])
             unassigned["expert_name"] = expert["name"]
@@ -167,6 +173,7 @@ async def add_followup_note(
     Add a follow-up note to an ended call.
     Only the expert who handled the call can add a note.
     """
+    log.info(f"[Expert:followup] expert_id={expert['_id']} — adding note to call_id={call_id}")
     calls = get_collection("calls")
 
     try:
@@ -178,15 +185,18 @@ async def add_followup_note(
         raise HTTPException(status_code=404, detail="Call not found")
 
     if call.get("expert_id") != str(expert["_id"]):
+        log.warning(f"[Expert:followup] Unauthorized — expert {expert['_id']} does not own call {call_id}")
         raise HTTPException(status_code=403, detail="You did not handle this call")
 
     if call["status"] != "ended":
+        log.warning(f"[Expert:followup] Call {call_id} is not ended (status={call['status']})")
         raise HTTPException(status_code=400, detail="Follow-up notes can only be added after call ends")
 
     await calls.update_one(
         {"_id": ObjectId(call_id)},
         {"$set": {"followup_note": body.note}},
     )
+    log.info(f"[Expert:followup] Note saved for call_id={call_id}")
 
     return {
         "status": "success",

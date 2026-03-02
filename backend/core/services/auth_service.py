@@ -15,8 +15,11 @@ from fastapi.security import OAuth2PasswordBearer
 from dotenv import load_dotenv
 
 from core.database import get_collection
+from commons.logger import logger as get_logger
 
 load_dotenv()
+
+log = get_logger(__name__)
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -54,7 +57,8 @@ def decode_access_token(token: str) -> Optional[dict]:
     """Decode and verify a JWT token. Returns payload or None."""
     try:
         return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-    except JWTError:
+    except JWTError as e:
+        log.warning(f"[AuthService] JWT decode failed: {e}")
         return None
 
 
@@ -80,10 +84,12 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
 
     payload = decode_access_token(token)
     if not payload:
+        log.warning("[AuthService:get_current_user] Invalid token (decode failed)")
         raise credentials_exception
 
     user_id: str = payload.get("sub")
     if not user_id:
+        log.warning("[AuthService:get_current_user] Token missing 'sub' field")
         raise credentials_exception
 
     # Fetch full user from DB
@@ -91,9 +97,11 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     from bson import ObjectId
     user = await users.find_one({"_id": ObjectId(user_id)})
     if not user:
+        log.warning(f"[AuthService:get_current_user] User not found in DB: {user_id}")
         raise credentials_exception
 
     if not user.get("is_verified"):
+        log.warning(f"[AuthService:get_current_user] Unverified user access attempt: {user_id}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Please verify your email before logging in",
@@ -105,6 +113,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
 async def require_farmer(user: dict = Depends(get_current_user)) -> dict:
     """FastAPI dependency — only allow farmers."""
     if user.get("role") != "farmer":
+        log.warning(f"[AuthService] Farmer-only access denied for user {user.get('_id')} (role={user.get('role')})")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access restricted to farmers only",
@@ -115,6 +124,7 @@ async def require_farmer(user: dict = Depends(get_current_user)) -> dict:
 async def require_expert(user: dict = Depends(get_current_user)) -> dict:
     """FastAPI dependency — only allow experts."""
     if user.get("role") != "expert":
+        log.warning(f"[AuthService] Expert-only access denied for user {user.get('_id')} (role={user.get('role')})")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access restricted to experts only",

@@ -20,10 +20,11 @@ from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
+from commons.logger import logger as get_logger
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"

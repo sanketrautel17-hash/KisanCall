@@ -19,14 +19,25 @@
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import api from '../api';
+import api, { WS_BASE_URL } from '../api';
 import { useAuth } from '../AuthContext';
 
-const ICE_SERVERS = [
+const DEFAULT_ICE_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
 ];
+
+const ICE_SERVERS = (() => {
+    try {
+        const raw = import.meta.env.VITE_ICE_SERVERS_JSON;
+        if (!raw) return DEFAULT_ICE_SERVERS;
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) && parsed.length > 0 ? parsed : DEFAULT_ICE_SERVERS;
+    } catch {
+        return DEFAULT_ICE_SERVERS;
+    }
+})();
 
 export default function CallScreen() {
     const { callId } = useParams();
@@ -48,6 +59,9 @@ export default function CallScreen() {
     const chunksRef = useRef([]);
     const timerRef = useRef(null);
     const setupDoneRef = useRef(false);   // prevent double-init
+    const remoteDescSetRef = useRef(false);
+    const answerDoneRef = useRef(false);
+    const remoteIceQueueRef = useRef([]);
 
     // ─── Timer helpers ────────────────────────────────────────────────────────
     const startTimer = useCallback(() => {
@@ -61,6 +75,30 @@ export default function CallScreen() {
 
     const formatTime = (s) =>
         `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
+    // ─── Apply answer SDP once (WS first, DB fallback second) ────────────────
+    const processAnswer = useCallback(async (sdp, sdpType = 'answer') => {
+        if (!pcRef.current || !sdp || answerDoneRef.current) return;
+        answerDoneRef.current = true;
+        try {
+            await pcRef.current.setRemoteDescription({ type: sdpType, sdp });
+            remoteDescSetRef.current = true;
+
+            // Flush ICE candidates that arrived before remote description was set.
+            for (const candidateInit of remoteIceQueueRef.current) {
+                try {
+                    await pcRef.current.addIceCandidate(candidateInit);
+                } catch {
+                    // Non-fatal: continue with remaining candidates.
+                }
+            }
+            remoteIceQueueRef.current = [];
+            setStatusMsg('Answer received. Negotiating...');
+        } catch (err) {
+            answerDoneRef.current = false;
+            console.error('[CallScreen] setRemoteDescription error:', err);
+        }
+    }, []);
 
     // ─── WebRTC setup (Farmer creates offer) ─────────────────────────────────
     const setupCall = useCallback(async () => {
@@ -191,8 +229,33 @@ export default function CallScreen() {
             });
 
         // ── Step 2: Open WS for ongoing signaling (answer + ICE) ─────────────
-        const ws = new WebSocket('ws://localhost:8000/ws/farmer');
+        const ws = new WebSocket(`${WS_BASE_URL}/ws/farmer`);
         wsRef.current = ws;
+        let answerPollInterval = null;
+        let answerPollTimeout = null;
+
+        const startAnswerPollingFallback = () => {
+            if (answerPollInterval || answerDoneRef.current) return;
+            answerPollInterval = setInterval(async () => {
+                if (answerDoneRef.current) return;
+                try {
+                    const res = await api.get(`/call/status/${callId}`);
+                    if (res.data.answer_sdp && !answerDoneRef.current) {
+                        await processAnswer(res.data.answer_sdp, 'answer');
+                    }
+                } catch {
+                    // non-fatal
+                }
+            }, 2000);
+
+            // Stop polling after 45s to avoid endless background requests.
+            answerPollTimeout = setTimeout(() => {
+                if (answerPollInterval) {
+                    clearInterval(answerPollInterval);
+                    answerPollInterval = null;
+                }
+            }, 45000);
+        };
 
         ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', token }));
 
@@ -201,30 +264,38 @@ export default function CallScreen() {
             try { msg = JSON.parse(e.data); } catch { return; }
 
             if (msg.type === 'webrtc_answer' && pcRef.current) {
-                // Expert answered — set remote description to complete handshake
-                try {
-                    await pcRef.current.setRemoteDescription({
-                        type: msg.sdp_type || 'answer',
-                        sdp: msg.sdp,
-                    });
-                    setStatusMsg('Answer received. Negotiating...');
-                } catch (err) {
-                    console.error('[CallScreen] setRemoteDescription error:', err);
+                if (answerPollInterval) {
+                    clearInterval(answerPollInterval);
+                    answerPollInterval = null;
                 }
+                if (answerPollTimeout) {
+                    clearTimeout(answerPollTimeout);
+                    answerPollTimeout = null;
+                }
+                await processAnswer(msg.sdp, msg.sdp_type || 'answer');
 
             } else if (msg.type === 'ice_candidate' && pcRef.current) {
-                try {
-                    await pcRef.current.addIceCandidate({
-                        candidate: msg.candidate,
-                        sdpMid: msg.sdp_mid,
-                        sdpMLineIndex: msg.sdp_mline_index,
-                    });
-                } catch { /* non-fatal */ }
+                const candidateInit = {
+                    candidate: msg.candidate,
+                    sdpMid: msg.sdp_mid,
+                    sdpMLineIndex: msg.sdp_mline_index,
+                };
+                if (!remoteDescSetRef.current) {
+                    remoteIceQueueRef.current.push(candidateInit);
+                } else {
+                    try {
+                        await pcRef.current.addIceCandidate(candidateInit);
+                    } catch {
+                        // non-fatal
+                    }
+                }
 
             } else if (msg.type === 'call_ended') {
                 hangUp(false);
             } else if (msg.type === 'connected') {
                 console.log('[WS:farmer] authenticated on CallScreen');
+                // Fallback: recover missed `webrtc_answer` events via DB polling.
+                startAnswerPollingFallback();
             }
         };
 
@@ -232,10 +303,12 @@ export default function CallScreen() {
         ws.onclose = () => console.log('[WS:farmer] closed');
 
         return () => {
+            if (answerPollInterval) clearInterval(answerPollInterval);
+            if (answerPollTimeout) clearTimeout(answerPollTimeout);
             ws.close();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [token, callId]);
+    }, [token, callId, processAnswer]);
 
     // ─── Hang up ─────────────────────────────────────────────────────────────
     const hangUp = useCallback(async (notify = true) => {
@@ -255,6 +328,9 @@ export default function CallScreen() {
         // Close peer connection
         pcRef.current?.close();
         pcRef.current = null;
+        answerDoneRef.current = false;
+        remoteDescSetRef.current = false;
+        remoteIceQueueRef.current = [];
 
         // Upload recording to backend for AI transcription
         if (chunksRef.current.length > 0) {

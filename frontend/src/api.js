@@ -1,11 +1,18 @@
 /**
  * KisanCall — Axios API client with JWT interceptor
- * All requests go to http://localhost:8000
+ * API/WS base URLs are configurable via:
+ * - VITE_API_BASE_URL (default: http://localhost:8000)
+ * - VITE_WS_BASE_URL  (default derived from API base)
  */
 import axios from 'axios';
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(/\/+$/, '');
+export const WS_BASE_URL = (
+  import.meta.env.VITE_WS_BASE_URL || API_BASE_URL.replace(/^http/i, 'ws')
+).replace(/\/+$/, '');
+
 const api = axios.create({
-  baseURL: 'http://localhost:8000',
+  baseURL: API_BASE_URL,
   timeout: 30000,
 });
 

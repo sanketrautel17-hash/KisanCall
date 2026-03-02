@@ -22,14 +22,25 @@
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import api from '../api';
+import api, { WS_BASE_URL } from '../api';
 import { useAuth } from '../AuthContext';
 
-const ICE_SERVERS = [
+const DEFAULT_ICE_SERVERS = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
     { urls: 'stun:stun2.l.google.com:19302' },
 ];
+
+const ICE_SERVERS = (() => {
+    try {
+        const raw = import.meta.env.VITE_ICE_SERVERS_JSON;
+        if (!raw) return DEFAULT_ICE_SERVERS;
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) && parsed.length > 0 ? parsed : DEFAULT_ICE_SERVERS;
+    } catch {
+        return DEFAULT_ICE_SERVERS;
+    }
+})();
 
 export default function ExpertCallScreen() {
     const { callId } = useParams();
@@ -169,36 +180,34 @@ export default function ExpertCallScreen() {
             })
             .catch(() => { });
 
-        const ws = new WebSocket('ws://localhost:8000/ws/expert');
+        const ws = new WebSocket(`${WS_BASE_URL}/ws/expert`);
         wsRef.current = ws;
 
-        // DB fallback timer — scheduled AFTER WS authenticates
-        // Farmer waits 2.5s before sending offer, so we check DB at 3s after auth.
-        let dbFallbackTimer = null;
+        // DB fallback polling — recovers missed `webrtc_offer` WS events.
+        let offerPollInterval = null;
+        let offerPollTimeout = null;
 
-        const scheduleDbFallback = () => {
-            if (dbFallbackTimer) return;
-            dbFallbackTimer = setTimeout(async () => {
-                if (answerDoneRef.current) return; // offer already handled via WS
-                console.log('[ExpertCallScreen] Checking DB for stored offer_sdp (fallback)...');
+        const startOfferPollingFallback = () => {
+            if (offerPollInterval || answerDoneRef.current) return;
+            offerPollInterval = setInterval(async () => {
+                if (answerDoneRef.current) return;
                 try {
                     const res = await api.get(`/call/status/${callId}`);
                     if (res.data.offer_sdp && !answerDoneRef.current) {
-                        console.log('[ExpertCallScreen] Found stored offer in DB — processing fallback');
-                        processOffer(res.data.offer_sdp, 'offer');
-                    } else if (!answerDoneRef.current) {
-                        // Offer not in DB yet — wait another 2s and try once more
-                        setTimeout(async () => {
-                            if (answerDoneRef.current) return;
-                            const res2 = await api.get(`/call/status/${callId}`);
-                            if (res2.data.offer_sdp && !answerDoneRef.current) {
-                                console.log('[ExpertCallScreen] Found stored offer in DB — processing fallback (retry)');
-                                processOffer(res2.data.offer_sdp, 'offer');
-                            }
-                        }, 2000);
+                        await processOffer(res.data.offer_sdp, 'offer');
                     }
-                } catch { }
-            }, 3000); // 3s after auth: farmer will have sent offer by now
+                } catch {
+                    // non-fatal
+                }
+            }, 2000);
+
+            // Stop polling after 45s to avoid endless background requests.
+            offerPollTimeout = setTimeout(() => {
+                if (offerPollInterval) {
+                    clearInterval(offerPollInterval);
+                    offerPollInterval = null;
+                }
+            }, 45000);
         };
 
         ws.onopen = () => ws.send(JSON.stringify({ type: 'auth', token }));
@@ -210,11 +219,18 @@ export default function ExpertCallScreen() {
             if (msg.type === 'connected') {
                 // WS authenticated — schedule DB fallback from NOW
                 console.log('[WS:expert] authenticated on ExpertCallScreen');
-                scheduleDbFallback();
+                startOfferPollingFallback();
 
             } else if (msg.type === 'webrtc_offer') {
                 // Fresh offer from WS — cancel DB fallback and process immediately
-                if (dbFallbackTimer) { clearTimeout(dbFallbackTimer); dbFallbackTimer = null; }
+                if (offerPollInterval) {
+                    clearInterval(offerPollInterval);
+                    offerPollInterval = null;
+                }
+                if (offerPollTimeout) {
+                    clearTimeout(offerPollTimeout);
+                    offerPollTimeout = null;
+                }
                 await processOffer(msg.sdp, msg.sdp_type || 'offer');
 
             } else if (msg.type === 'ice_candidate' && pcRef.current) {
@@ -243,7 +259,8 @@ export default function ExpertCallScreen() {
         ws.onclose = () => console.log('[WS:expert] closed');
 
         return () => {
-            if (dbFallbackTimer) clearTimeout(dbFallbackTimer);
+            if (offerPollInterval) clearInterval(offerPollInterval);
+            if (offerPollTimeout) clearTimeout(offerPollTimeout);
             ws.close();
         };
         // eslint-disable-next-line react-hooks/exhaustive-deps
